@@ -12,7 +12,7 @@ static inline U64 queen_attacks(int sq, U64 occ) {
 static inline int mirror_sq(int sq) { return sq ^ 56; } // flip ranks for black PST indexing
 
 // ------------------------------------------------------------
-// Tunable weights (start here if you want to tweak personality)
+// Tunable weights
 // ------------------------------------------------------------
 static constexpr int TEMPO_BONUS = 10;
 
@@ -75,7 +75,7 @@ static constexpr int PHASE_INC[6] = {0, 1, 1, 2, 4, 0};
 static constexpr int TOTAL_PHASE = 24;
 
 // ------------------------------------------------------------
-// PSTs (starter set; you can tune later)
+// PSTs
 // ------------------------------------------------------------
 static constexpr int PST_P_MG[64] = {
    0,  0,  0,  0,  0,  0,  0,  0,
@@ -361,7 +361,7 @@ static constexpr U64 LIGHT_SQ = ~DARK_SQ;
 
 static inline bool supported_by_pawn(Color c, int sq, U64 pawns) {
   // squares that attack sq with a pawn of color c
-  // white pawn attackers to sq are ATK.pawn[BLACK][sq] (reverse trick)
+  // white pawn attackers to sq are ATK.pawn[BLACK][sq]
   U64 attackers = (c == WHITE) ? ATK.pawn[BLACK][sq] : ATK.pawn[WHITE][sq];
   return (pawns & attackers) != 0;
 }
