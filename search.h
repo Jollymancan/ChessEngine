@@ -10,7 +10,7 @@ struct GoLimits {
   int winc_ms = 0, binc_ms = 0;
   int movestogo = 0;
   int depth = 0; // if >0, fixed depth search
-  int movetime_ms = 0; // <-- ADD THIS
+  int movetime_ms = 0;
 };
 
 Move parse_uci_move(Position& pos, const std::string& uci);
