@@ -39,14 +39,12 @@ static bool parse_position_cmd(Position& pos, const std::string& line) {
     const std::string startpos = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
     if (!load_fen(pos, startpos)) return false;
   } else if (token == "fen") {
-    // fen is 6 fields typically, but may have extra; read up to "moves" or end
     std::string fen, w;
     int fields = 0;
     while (iss >> w) {
       if (w == "moves") break;
       fen += (fields++ ? " " : "") + w;
       if (fields >= 6) {
-        // still may have more, but standard is 6
       }
     }
     if (!load_fen(pos, fen)) return false;
@@ -99,7 +97,6 @@ auto stop_search = [&](){
       std::cout << "readyok\n";
       std::cout.flush();
     } else if (line.rfind("setoption", 0) == 0) {
-      // minimal: ignore for now
     } else if (line == "ucinewgame") {
       stop_search();
       searcher.clear();
@@ -113,7 +110,7 @@ auto stop_search = [&](){
       join_if_needed();
 
       GoLimits lim{};
-      lim.depth = 0; // 0 => time-based
+      lim.depth = 0; // 0 implies time-based
       lim.movestogo = 0;
 
       // parse go params
