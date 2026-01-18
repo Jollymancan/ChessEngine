@@ -38,7 +38,6 @@ void Attacks::init() {
   }
 }
 
-// baseline ray sliders (correct; later swap to magics/BMI2)
 U64 rook_attacks(int sq, U64 occ) {
   U64 a=0;
   int f=file_of(sq), r=rank_of(sq);
