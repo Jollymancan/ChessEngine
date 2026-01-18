@@ -7,7 +7,7 @@
 #include <thread>
 
 static char piece_char(int code12) {
-  // code: color*6 + piece, empty is 12 in your code
+  // color*6 + piece, empty is 12
   if (code12 == 12) return '.';
   int c = code12 / 6;
   int p = code12 % 6;
