@@ -1,4 +1,5 @@
 #include "eval.h"
+#include "params.h"
 #include "attacks.h"
 #include "bitboard.h"
 #include <algorithm>
@@ -35,6 +36,12 @@ static constexpr int ROOK_OPEN_FILE_BONUS_MG = 18;
 static constexpr int ROOK_OPEN_FILE_BONUS_EG = 10;
 static constexpr int ROOK_SEMIOPEN_FILE_BONUS_MG = 10;
 static constexpr int ROOK_SEMIOPEN_FILE_BONUS_EG = 6;
+
+// Extra rook features
+static constexpr int ROOK_7TH_BONUS_MG = 20;
+static constexpr int ROOK_7TH_BONUS_EG = 25;
+static constexpr int CONNECTED_ROOKS_BONUS_MG = 10;
+static constexpr int CONNECTED_ROOKS_BONUS_EG = 16;
 
 // Mobility weights (per attacked square)
 static constexpr int MOB_N_MG = 4,  MOB_N_EG = 4;
@@ -359,6 +366,28 @@ static inline void hanging_penalties(const Position& pos, Color us, U64 attUs, U
 static constexpr U64 DARK_SQ  = 0xAA55AA55AA55AA55ULL; // a1 dark
 static constexpr U64 LIGHT_SQ = ~DARK_SQ;
 
+// ------------------------------------------------------------
+// Pawn hash (caches pawn-structure evaluation)
+// ------------------------------------------------------------
+namespace {
+  static constexpr size_t PAWN_TT_SIZE = 1u << 18; // 262k
+  struct PawnEntry {
+    uint64_t key = 0;
+    int mg = 0;
+    int eg = 0;
+    U64 passedW = 0;
+    U64 passedB = 0;
+    U64 connectedW = 0;
+    U64 connectedB = 0;
+  };
+  static PawnEntry PawnTT[PAWN_TT_SIZE];
+
+
+    static inline uint64_t pawn_key(const Position& pos) {
+    return pos.pawnKey;
+  }
+}
+
 static inline bool supported_by_pawn(Color c, int sq, U64 pawns) {
   // squares that attack sq with a pawn of color c
   // white pawn attackers to sq are ATK.pawn[BLACK][sq]
@@ -393,7 +422,7 @@ static inline bool enemy_pawn_can_chase(Color us, int sq, U64 enemyPawns) {
 // ------------------------------------------------------------
 // eval()
 // ------------------------------------------------------------
-int eval(const Position& pos) {
+static int eval_uncached(const Position& pos) {
   init_masks_once();
 
   int mg = 0, eg = 0;
@@ -432,52 +461,78 @@ int eval(const Position& pos) {
   if (popcount64(pos.bb[WHITE][BISHOP]) >= 2) { mg += BISHOP_PAIR_BONUS_MG; eg += BISHOP_PAIR_BONUS_EG; }
   if (popcount64(pos.bb[BLACK][BISHOP]) >= 2) { mg -= BISHOP_PAIR_BONUS_MG; eg -= BISHOP_PAIR_BONUS_EG; }
 
-  // Pawn structure: doubled / isolated / passed / connected passed
-  for (int c=0;c<2;c++){
-    Color us = (Color)c;
-    int sign = (us==WHITE) ? +1 : -1;
+  // Pawn structure: doubled / isolated / passed / connected passed (cached)
+  const uint64_t pk = pawn_key(pos);
+  PawnEntry& pe = PawnTT[pk & (PAWN_TT_SIZE - 1)];
+  if (pe.key == pk) {
+    mg += pe.mg;
+    eg += pe.eg;
+  } else {
+    int pmg = 0, peg = 0;
+    U64 passedW = 0, passedB = 0;
+    U64 connW = 0, connB = 0;
 
-    U64 myP = pos.bb[us][PAWN];
-    U64 oppP = pos.bb[us^1][PAWN];
+    for (int c=0;c<2;c++){
+      Color us = (Color)c;
+      int sign = (us==WHITE) ? +1 : -1;
 
-    // doubled + isolated (file-based)
-    for (int f=0; f<8; f++){
-      int n = popcount64(myP & FILE_MASK[f]);
-      if (n >= 2) {
-        int extra = n - 1;
-        mg -= sign * (extra * DOUBLED_PAWN_PEN_MG);
-        eg -= sign * (extra * DOUBLED_PAWN_PEN_EG);
+      U64 myP = pos.bb[us][PAWN];
+      U64 oppP = pos.bb[us^1][PAWN];
+
+      // doubled + isolated (file-based)
+      for (int f=0; f<8; f++){
+        int n = popcount64(myP & FILE_MASK[f]);
+        if (n >= 2) {
+          int extra = n - 1;
+          pmg -= sign * (extra * DOUBLED_PAWN_PEN_MG);
+          peg -= sign * (extra * DOUBLED_PAWN_PEN_EG);
+        }
+        if (n >= 1 && (myP & ADJ_FILE_MASK[f]) == 0) {
+          pmg -= sign * (n * ISOLATED_PAWN_PEN_MG);
+          peg -= sign * (n * ISOLATED_PAWN_PEN_EG);
+        }
       }
-      if (n >= 1 && (myP & ADJ_FILE_MASK[f]) == 0) {
-        mg -= sign * (n * ISOLATED_PAWN_PEN_MG);
-        eg -= sign * (n * ISOLATED_PAWN_PEN_EG);
+
+      // passed
+      U64 passedMask = 0;
+      U64 pawns = myP;
+      while (pawns){
+        int sq = pop_lsb(pawns);
+        if (is_passed_pawn(us, sq, oppP)) {
+          passedMask |= sq_bb(sq);
+          int pr = pawn_rank_from_side(us, sq);
+          pmg += sign * PASSED_MG[pr];
+          peg += sign * PASSED_EG[pr];
+        }
       }
+
+      // connected passers (cache a mask too)
+      U64 connMask = 0;
+      for (int f=0; f<8; f++){
+        if ((passedMask & FILE_MASK[f]) == 0) continue;
+        bool adj = false;
+        if (f > 0 && (passedMask & FILE_MASK[f-1])) adj = true;
+        if (f < 7 && (passedMask & FILE_MASK[f+1])) adj = true;
+        if (adj) {
+          connMask |= (passedMask & FILE_MASK[f]);
+          pmg += sign * CONNECTED_PASSED_BONUS_MG;
+          peg += sign * CONNECTED_PASSED_BONUS_EG;
+        }
+      }
+
+      if (us == WHITE) { passedW = passedMask; connW = connMask; }
+      else { passedB = passedMask; connB = connMask; }
     }
 
-    // passed + connected passed
-    U64 passedMask = 0;
-    U64 pawns = myP;
-    while (pawns){
-      int sq = pop_lsb(pawns);
-      if (is_passed_pawn(us, sq, oppP)) {
-        passedMask |= sq_bb(sq);
-        int pr = pawn_rank_from_side(us, sq);
-        mg += sign * PASSED_MG[pr];
-        eg += sign * PASSED_EG[pr];
-      }
-    }
-
-    // connected passers: adjacent files with passers
-    for (int f=0; f<8; f++){
-      if ((passedMask & FILE_MASK[f]) == 0) continue;
-      bool adj = false;
-      if (f > 0 && (passedMask & FILE_MASK[f-1])) adj = true;
-      if (f < 7 && (passedMask & FILE_MASK[f+1])) adj = true;
-      if (adj) {
-        mg += sign * CONNECTED_PASSED_BONUS_MG;
-        eg += sign * CONNECTED_PASSED_BONUS_EG;
-      }
-    }
+    pe.key = pk;
+    pe.mg = pmg;
+    pe.eg = peg;
+    pe.passedW = passedW;
+    pe.passedB = passedB;
+    pe.connectedW = connW;
+    pe.connectedB = connB;
+    mg += pmg;
+    eg += peg;
   }
 
   // Rooks on open/semi-open files
@@ -503,6 +558,51 @@ int eval(const Position& pos) {
       } else if (!myPawnOnFile && oppPawnOnFile) {
         mg += sign * ROOK_SEMIOPEN_FILE_BONUS_MG;
         eg += sign * ROOK_SEMIOPEN_FILE_BONUS_EG;
+      }
+
+      // Rook on 7th rank (relative) is often decisive if the enemy king or pawns are confined.
+      int r = rank_of(sq);
+      if ((us == WHITE && r == 6) || (us == BLACK && r == 1)) {
+        U64 oppPawn7 = (oppP & (0xFFULL << (r * 8))) != 0;
+        bool oppKingBack = (us == WHITE) ? (rank_of(pos.kingSq[BLACK]) >= 6) : (rank_of(pos.kingSq[WHITE]) <= 1);
+        if (oppPawn7 || oppKingBack) {
+          mg += sign * ROOK_7TH_BONUS_MG;
+          eg += sign * ROOK_7TH_BONUS_EG;
+        }
+      }
+    }
+
+    // Connected rooks (unblocked on same file/rank)
+    if (popcount64(myR) >= 2) {
+      int sqs[4];
+      int n = 0;
+      U64 tmp = myR;
+      while (tmp && n < 4) sqs[n++] = pop_lsb(tmp);
+
+      bool connected = false;
+      for (int i = 0; i < n && !connected; i++) {
+        for (int j = i + 1; j < n && !connected; j++) {
+          int a = sqs[i], b = sqs[j];
+          int fa = file_of(a), fb = file_of(b);
+          int ra = rank_of(a), rb = rank_of(b);
+          if (fa == fb) {
+            int lo = std::min(ra, rb) + 1;
+            int hi = std::max(ra, rb) - 1;
+            U64 between = 0;
+            for (int rr = lo; rr <= hi; rr++) between |= sq_bb(rr * 8 + fa);
+            if ((between & occAll) == 0) connected = true;
+          } else if (ra == rb) {
+            int lo = std::min(fa, fb) + 1;
+            int hi = std::max(fa, fb) - 1;
+            U64 between = 0;
+            for (int ff = lo; ff <= hi; ff++) between |= sq_bb(ra * 8 + ff);
+            if ((between & occAll) == 0) connected = true;
+          }
+        }
+      }
+      if (connected) {
+        mg += sign * CONNECTED_ROOKS_BONUS_MG;
+        eg += sign * CONNECTED_ROOKS_BONUS_EG;
       }
     }
   }
@@ -566,6 +666,84 @@ int eval(const Position& pos) {
   if (wOnBRing >= KING_PRESSURE_TH) mg += KING_PRESSURE_BONUS;
   if (bOnWRing >= KING_PRESSURE_TH) mg -= KING_PRESSURE_BONUS;
 
+
+// ------------------------------------------------------------
+// King safety: "attack units" into an expanded king zone (MG)
+// This is a classical, NNUE-free way to value coordinated attacks.
+// ------------------------------------------------------------
+auto king_zone = [&](int ksq) -> U64 {
+  // Ring 1 (king moves) plus one extra ring.
+  U64 r1 = ATK.king[ksq] | sq_bb(ksq);
+  U64 r2 = 0;
+  U64 tmp = r1;
+  while (tmp) { int s = pop_lsb(tmp); r2 |= ATK.king[s]; }
+  return r1 | r2;
+};
+
+auto attack_units = [&](Color att, int ksq, U64 occAllLocal) -> int {
+  U64 zone = king_zone(ksq);
+  int units = 0;
+  int attackers = 0;
+
+  // Pawns
+  U64 pawns = pos.bb[att][PAWN];
+  U64 pawnAtt = 0;
+  while (pawns) { int sq = pop_lsb(pawns); pawnAtt |= ATK.pawn[att][sq]; }
+  if (pawnAtt & zone) { units += 2; attackers++; }
+
+  // Knights
+  U64 knights = pos.bb[att][KNIGHT];
+  while (knights) {
+    int sq = pop_lsb(knights);
+    U64 a = ATK.knight[sq] & zone;
+    if (a) { units += g_params.ks_units_n; attackers++; }
+  }
+
+  // Bishops
+  U64 bishops = pos.bb[att][BISHOP];
+  while (bishops) {
+    int sq = pop_lsb(bishops);
+    U64 a = bishop_attacks(sq, occAllLocal) & zone;
+    if (a) { units += g_params.ks_units_b; attackers++; }
+  }
+
+  // Rooks
+  U64 rooks = pos.bb[att][ROOK];
+  while (rooks) {
+    int sq = pop_lsb(rooks);
+    U64 a = rook_attacks(sq, occAllLocal) & zone;
+    if (a) { units += g_params.ks_units_r; attackers++; }
+  }
+
+  // Queens
+  U64 queens = pos.bb[att][QUEEN];
+  while (queens) {
+    int sq = pop_lsb(queens);
+    U64 a = queen_attacks(sq, occAllLocal) & zone;
+    if (a) { units += g_params.ks_units_q; attackers++; }
+  }
+
+  // Bonus for having multiple attacking pieces involved
+  if (attackers >= 2) units += g_params.ks_attacker_bonus * (attackers - 1);
+  if (g_params.ks_scale != 1) units *= g_params.ks_scale;
+  return units;
+};
+
+auto ks_penalty = [&](int units)->int{
+  // Convert units into a non-linear MG penalty. Clamp to keep it stable.
+  static const int T[33] = {
+    0,0,1,2,3,5,7,9,12,15,18,22,26,30,35,40,45,50,56,62,68,74,80,87,94,101,108,116,124,132,140,148,156
+  };
+  if (units < 0) units = 0;
+  if (units > 32) units = 32;
+  return T[units];
+};
+
+int wUnits = attack_units(WHITE, pos.kingSq[BLACK], occAll);
+int bUnits = attack_units(BLACK, pos.kingSq[WHITE], occAll);
+mg += ks_penalty(wUnits);
+mg -= ks_penalty(bUnits);
+
   // Shield + open file safety (MG)
   U64 allP = pos.bb[WHITE][PAWN] | pos.bb[BLACK][PAWN];
   king_safety_shield_openfiles(pos, WHITE, pos.bb[WHITE][PAWN], allP, mg, +1);
@@ -574,6 +752,44 @@ int eval(const Position& pos) {
   // Hanging piece penalties (MG/EG)
   hanging_penalties(pos, WHITE, wAtt, bAtt, mg, eg);
   hanging_penalties(pos, BLACK, bAtt, wAtt, mg, eg);
+
+
+// Threats: reward creating attacked-and-undefended targets (MG/EG)
+auto threats_bonus = [&](Color att, U64 attMap, U64 defMap, int& outMG, int& outEG) {
+  Color def = (Color)(att ^ 1);
+  int sign = (att == WHITE) ? +1 : -1;
+
+  // Iterate enemy pieces (exclude king)
+  for (int pt = KNIGHT; pt <= QUEEN; pt++) {
+    U64 bbp = pos.bb[def][pt];
+    while (bbp) {
+      int sq = pop_lsb(bbp);
+      U64 sbb = sq_bb(sq);
+      if ((attMap & sbb) && !(defMap & sbb)) {
+        int b = 0;
+        if (pt == KNIGHT || pt == BISHOP) b = g_params.thr_hanging_minor;
+        else if (pt == ROOK) b = g_params.thr_hanging_rook;
+        else if (pt == QUEEN) b = g_params.thr_hanging_queen;
+        outMG += sign * b;
+        outEG += sign * (b / 2);
+      }
+    }
+  }
+
+  // Pawn threats (enemy pieces attacked by pawns)
+  U64 pawns = pos.bb[att][PAWN];
+  U64 pAtt = 0;
+  while (pawns) { int sq = pop_lsb(pawns); pAtt |= ATK.pawn[att][sq]; }
+  U64 targets = pAtt & (pos.occ[def] ^ pos.bb[def][KING]); // exclude king
+  if (targets) {
+    int n = popcount64(targets);
+    outMG += sign * (n * 8);
+    outEG += sign * (n * 4);
+  }
+};
+
+threats_bonus(WHITE, wAtt, bAtt, mg, eg);
+threats_bonus(BLACK, bAtt, wAtt, mg, eg);
 
   // Knight outposts
   for (int c=0;c<2;c++){
@@ -616,7 +832,56 @@ int eval(const Position& pos) {
 
   // Tempo (small bias)
   mg += (pos.stm == WHITE) ? TEMPO_BONUS : -TEMPO_BONUS;
+
+  // Endgame king activity (encourage central king when queens are off)
+  // Scale by how far we are into the endgame.
+  {
+    const int endgame = (TOTAL_PHASE - phase);
+    if (endgame > 0) {
+      auto center_dist = [&](int sq) {
+        int f = file_of(sq), r = rank_of(sq);
+        int d1 = std::abs(f - 3) + std::abs(r - 3); // d4
+        int d2 = std::abs(f - 4) + std::abs(r - 3); // e4
+        int d3 = std::abs(f - 3) + std::abs(r - 4); // d5
+        int d4 = std::abs(f - 4) + std::abs(r - 4); // e5
+        return std::min(std::min(d1, d2), std::min(d3, d4));
+      };
+      int dw = center_dist(pos.kingSq[WHITE]);
+      int db = center_dist(pos.kingSq[BLACK]);
+      int bw = std::max(0, 4 - dw);
+      int bb = std::max(0, 4 - db);
+      int bonus = (endgame * 4) / TOTAL_PHASE;
+      eg += (bw - bb) * bonus;
+    }
+  }
   eg += (pos.stm == WHITE) ? TEMPO_BONUS : -TEMPO_BONUS;
+
+
+// Endgame scaling for drawish material (prevents over-optimism)
+{
+  int wp = popcount64(pos.bb[WHITE][PAWN]);
+  int bp = popcount64(pos.bb[BLACK][PAWN]);
+  int wq = popcount64(pos.bb[WHITE][QUEEN]);
+  int bq = popcount64(pos.bb[BLACK][QUEEN]);
+  int wr = popcount64(pos.bb[WHITE][ROOK]);
+  int br = popcount64(pos.bb[BLACK][ROOK]);
+  int wm = popcount64(pos.bb[WHITE][KNIGHT] | pos.bb[WHITE][BISHOP]);
+  int bm = popcount64(pos.bb[BLACK][KNIGHT] | pos.bb[BLACK][BISHOP]);
+
+  int scale = 64;
+  if (wp + bp == 0 && wq + bq == 0 && wr + br == 0) {
+    // Minor-only endgames are often very drawish.
+    int minors = wm + bm;
+    if (minors <= 2) scale = 8;
+    else if (minors <= 4) scale = 20;
+  } else if (wp + bp <= 2 && wq + bq == 0 && wr + br == 0) {
+    // Almost pawnless minor endgames
+    scale = 40;
+  }
+  // Apply only to the advantage component.
+  mg = (mg * scale) / 64;
+  eg = (eg * scale) / 64;
+}
 
   // Tapered blend
   int mgPhase = phase;
@@ -625,4 +890,28 @@ int eval(const Position& pos) {
 
   // Return from side-to-move perspective for negamax
   return (pos.stm == WHITE) ? score : -score;
+}
+
+
+// ------------------------------------------------------------
+// Eval cache (transposition-friendly static eval memoization)
+// ------------------------------------------------------------
+namespace {
+  static constexpr size_t EVAL_TT_SIZE = 1u << 20; // 1M entries
+  struct EvalEntry {
+    uint64_t key = 0;
+    int score = 0;
+  };
+  static EvalEntry EvalTT[EVAL_TT_SIZE];
+}
+
+int eval(const Position& pos) {
+  const uint64_t k = pos.key;
+  EvalEntry& e = EvalTT[k & (EVAL_TT_SIZE - 1)];
+  if (e.key == k) return e.score;
+
+  const int s = eval_uncached(pos);
+  e.key = k;
+  e.score = s;
+  return s;
 }

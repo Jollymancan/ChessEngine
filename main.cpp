@@ -2,10 +2,12 @@
 #include "fen.h"
 #include "uci.h"
 #include "cli.h"
+#include "zobrist.h"
 #include <string>
 
 int main(int argc, char** argv) {
   ATK.init();
+  zobrist_init();
 
   Position pos;
   const std::string startpos = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";

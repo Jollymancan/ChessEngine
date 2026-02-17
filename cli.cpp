@@ -5,6 +5,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <memory>
 
 static char piece_char(int code12) {
   // color*6 + piece, empty is 12
@@ -47,8 +48,8 @@ static bool has_any_legal_move(Position& pos) {
 }
 
 void cli_loop(Position& pos) {
-  Searcher searcher;
-  searcher.tt_resize_mb(64);
+  auto searcher = std::make_unique<Searcher>();
+  searcher->tt_resize_mb(64);
 
   const std::string startpos = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
   load_fen(pos, startpos);
@@ -71,7 +72,7 @@ void cli_loop(Position& pos) {
     } else if (cmd == "d") {
       print_board(pos);
     } else if (cmd == "new") {
-      searcher.clear();
+      searcher->clear();
       load_fen(pos, startpos);
       print_board(pos);
     } else if (cmd == "fen") {
@@ -110,7 +111,7 @@ void cli_loop(Position& pos) {
       GoLimits lim{};
       lim.movetime_ms = ms;
 
-      Move best = searcher.go(pos, lim);
+      Move best = searcher->go(pos, lim);
       if (!best) {
         std::cout << "No legal moves.\n";
         continue;
@@ -142,7 +143,7 @@ void cli_loop(Position& pos) {
           std::cout << (inCheck ? "Checkmate.\n" : "Stalemate.\n");
           break;
         }
-        Move best = searcher.go(pos, lim);
+        Move best = searcher->go(pos, lim);
         if (!best) { std::cout << "No move.\n"; break; }
         Undo u;
         pos.make(best, u);

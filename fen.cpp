@@ -1,5 +1,6 @@
 #include "fen.h"
 #include "bitboard.h"
+#include "zobrist.h"
 #include <cctype>
 
 static int sq_from_alg(const std::string& s) {
@@ -18,6 +19,8 @@ static void set_piece(Position& pos, int sq, Color c, Piece p) {
 }
 
 bool load_fen(Position& out, const std::string& fen) {
+  // Ensure zobrist tables are ready for rebuild_key().
+  zobrist_init();
   Position p;
   int i=0;
   int sq = 56; // a8
@@ -78,7 +81,29 @@ bool load_fen(Position& out, const std::string& fen) {
     p.epSq = sq_from_alg(eps);
   }
 
+
+  // Optional halfmove/fullmove
+  while (i < (int)fen.size() && fen[i] == ' ') i++;
+  // halfmove clock
+  if (i < (int)fen.size()) {
+    int hm = 0;
+    while (i < (int)fen.size() && std::isdigit((unsigned char)fen[i])) {
+      hm = hm*10 + (fen[i]-'0'); i++;
+    }
+    p.halfmoveClock = (uint16_t)std::min(hm, 1000);
+  }
+  while (i < (int)fen.size() && fen[i] == ' ') i++;
+  if (i < (int)fen.size()) {
+    int fm = 0;
+    while (i < (int)fen.size() && std::isdigit((unsigned char)fen[i])) {
+      fm = fm*10 + (fen[i]-'0'); i++;
+    }
+    if (fm > 0) p.fullmoveNumber = (uint16_t)std::min(fm, 10000);
+  }
+
   p.rebuild_occ();
+  p.rebuild_key();
+  p.reset_game_history();
   out = p;
   return true;
 }
